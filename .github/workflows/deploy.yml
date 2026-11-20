@@ -1,0 +1,60 @@
+# Deploys this site to One.com over SFTP every time you push to the main branch.
+# You can also run it by hand: GitHub → Actions → "Deploy to One.com" → Run workflow.
+#
+# Needs these repository secrets (Settings → Secrets and variables → Actions):
+#   SSH_HOST         e.g. ssh.britzadvertiser.co.uk   (same as the main site; shown in One.com → SSH & SFTP)
+#   SSH_USER         your One.com SSH username         (shown in One.com → SSH & SFTP)
+#   SSH_PRIVATE_KEY  the whole private key file, including the BEGIN/END lines
+#   DEPLOY_PATH      the subdomain's folder on One.com (NOT the main site's folder)
+# Optional:
+#   SSH_PORT         only if One.com gives you a port other than 22
+
+name: Deploy to One.com
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Install lftp (SFTP upload tool)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lftp
+
+      - name: Set up the SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Upload the site
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          # Uploads new and changed files. It does NOT delete anything on the server,
+          # so other folders that share this space (like a subdomain) are safe.
+          lftp -e "
+            set sftp:connect-program 'ssh -a -x -i $HOME/.ssh/deploy_key -o UserKnownHostsFile=$HOME/.ssh/known_hosts';
+            set net:max-retries 2;
+            set net:timeout 30;
+            open -u '$SSH_USER', -p '$SSH_PORT' sftp://$SSH_HOST;
+            mirror --reverse --verbose --parallel=4 --exclude-glob .git* --exclude-glob .github/ --exclude-glob README.md ./ '$DEPLOY_PATH';
+            bye
+          "
